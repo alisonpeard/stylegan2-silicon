@@ -25,15 +25,18 @@ class Conv2DMod(Layer):
         super(Conv2DMod, self).__init__(**kwargs)
         self.filters = filters
         self.rank = 2
+
         self.kernel_size = conv_utils.normalize_tuple(kernel_size, 2, 'kernel_size')
         self.strides = conv_utils.normalize_tuple(strides, 2, 'strides')
         self.padding = conv_utils.normalize_padding(padding)
         self.dilation_rate = conv_utils.normalize_tuple(dilation_rate, 2, 'dilation_rate')
+
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.activity_regularizer = regularizers.get(activity_regularizer)
         self.kernel_constraint = constraints.get(kernel_constraint)
         self.demod = demod
+
         self.input_spec = [InputSpec(ndim = 4),
                             InputSpec(ndim = 2)]
 
@@ -55,24 +58,28 @@ class Conv2DMod(Layer):
                                       constraint=self.kernel_constraint)
 
         # Set input spec.
+        InputSpec(ndim=4)
+        InputSpec(ndim=4, axes={channel_axis: input_dim})
+        InputSpec(ndim=2)
+        [InputSpec(ndim=4, axes={channel_axis: input_dim}),
+                            InputSpec(ndim=2)]
         self.input_spec = [InputSpec(ndim=4, axes={channel_axis: input_dim}),
                             InputSpec(ndim=2)]
         self.built = True
 
     def call(self, inputs):
-
         #To channels first
         x = tf.transpose(inputs[0], [0, 3, 1, 2])
 
         #Get weight and bias modulations
         #Make sure w's shape is compatible with self.kernel
-        w = K.expand_dims(K.expand_dims(K.expand_dims(inputs[1], axis = 1), axis = 1), axis = -1)
+        w = K.expand_dims(K.expand_dims(K.expand_dims(inputs[1], axis=1), axis=1), axis=-1)
 
         #Add minibatch layer to weights
-        wo = K.expand_dims(self.kernel, axis = 0)
+        wo = K.expand_dims(self.kernel, axis=0)
 
         #Modulate
-        weights = wo * (w+1)
+        weights = wo * (w + 1)
 
         #Demodulate
         if self.demod:
@@ -94,7 +101,7 @@ class Conv2DMod(Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(self, input_shape): # bug here--Alison
         space = input_shape[0][1:-1]
         new_space = []
         for i in range(len(space)):
@@ -106,7 +113,10 @@ class Conv2DMod(Layer):
                 dilation=self.dilation_rate[i])
             new_space.append(new_dim)
 
-        return (input_shape[0],) + tuple(new_space) + (self.filters,)
+        # output_shape = (input_shape[0],) + tuple(new_space) + (self.filters,)  # Alison replace
+        # output_shape = (input_shape[0][0], new_space[0], new_space[1], self.filters)
+        output_shape = [input_shape[0][0]] + new_space + [self.filters]
+        return tf.TensorShape(dims=output_shape) 
 
     def get_config(self):
         config = {

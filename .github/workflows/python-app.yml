@@ -12,11 +12,11 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: self-hosted # GitHub's hosted runners
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python 3.10
+    - uses: actions/checkout@v2 # checkout repo
+    - name: Set up Python 3.10  # set up python env
       uses: actions/setup-python@v2
       with:
         python-version: "3.10"

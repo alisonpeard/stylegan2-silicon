@@ -1,11 +1,14 @@
+# %%
 from PIL import Image
 from math import floor, log2
 import numpy as np
 import time
 from functools import partial
 from random import random
+import psutil
 import os
 
+import keras
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import *
 from tensorflow.keras.optimizers import *
@@ -63,15 +66,18 @@ def gradient_penalty(samples, output, weight):
 
 
 #Lambdas
+@keras.saving.register_keras_serializable()
 def crop_to_fit(x):
     height = x[1].shape[1]
     width = x[1].shape[2]
 
     return x[0][:, :height, :width, :]
 
+@keras.saving.register_keras_serializable()
 def upsample(x):
     return K.resize_images(x,2,2,"channels_last",interpolation='bilinear')
 
+@keras.saving.register_keras_serializable()
 def upsample_to_size(x):
     y = im_size // x.shape[2]
     x = K.resize_images(x, y, y, "channels_last",interpolation='bilinear')
@@ -79,19 +85,19 @@ def upsample_to_size(x):
 
 
 #Blocks
-def g_block(inp, istyle, inoise, fil, u = True):
+def g_block(inp, istyle, inoise, fil, u=True):
     if u:
         #Custom upsampling because of clone_model issue
-        out = Lambda(upsample, output_shape=[None, inp.shape[2] * 2, inp.shape[2] * 2, None])(inp)
+        out = Lambda(upsample, output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
     else:
         out = Activation('linear')(inp)
-
-    rgb_style = Dense(fil, kernel_initializer = VarianceScaling(200/out.shape[2]))(istyle)
+        
+    rgb_style = Dense(fil, kernel_initializer=VarianceScaling(200 / out.shape[2]))(istyle)
     style = Dense(inp.shape[-1], kernel_initializer = 'he_uniform')(istyle)
     delta = Lambda(crop_to_fit)([inoise, out])
     d = Dense(fil, kernel_initializer = 'zeros')(delta)
 
-    out = Conv2DMod(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')([out, style])
+    out = Conv2DMod(filters=fil, kernel_size=3, padding='same', kernel_initializer='he_uniform')([out, style])
     out = add([out, d])
     out = LeakyReLU(0.2)(out)
 
@@ -102,7 +108,9 @@ def g_block(inp, istyle, inoise, fil, u = True):
     out = add([out, d])
     out = LeakyReLU(0.2)(out)
 
-    return out, to_rgb(out, rgb_style)
+    rgb = to_rgb(out, rgb_style)
+    return out, rgb
+
 
 def d_block(inp, fil, p = True):
     res = Conv2D(fil, 1, kernel_initializer = 'he_uniform')(inp)
@@ -115,18 +123,21 @@ def d_block(inp, fil, p = True):
     out = add([res, out])
 
     if p:
-        out = AveragePooling2D()(out)
+        out = AveragePooling2D(pool_size=(2, 2))(out)
 
     return out
+
 
 def to_rgb(inp, style):
     size = inp.shape[2]
     x = Conv2DMod(3, 1, kernel_initializer = VarianceScaling(200/size), demod = False)([inp, style])
-    return Lambda(upsample_to_size, output_shape=[None, im_size, im_size, None])(x)
+    out = Lambda(upsample_to_size, output_shape=(im_size, im_size, None))(x) # changed to tuple --Alison
+    return out
+
 
 def from_rgb(inp, conc = None):
     fil = int(im_size * 4 / inp.shape[2])
-    z = AveragePooling2D()(inp)
+    z = AveragePooling2D(pool_size=(2, 2))(inp)
     x = Conv2D(fil, 1, kernel_initializer = 'he_uniform')(z)
     if conc is not None:
         x = concatenate([x, conc])
@@ -159,8 +170,8 @@ class GAN(object):
         self.discriminator()
         self.generator()
 
-        self.GMO = Adam(lr = self.LR, beta_1 = 0, beta_2 = 0.99)
-        self.DMO = Adam(lr = self.LR, beta_1 = 0, beta_2 = 0.99)
+        self.GMO = Adam(learning_rate=self.LR, beta_1=0, beta_2=0.99)
+        self.DMO = Adam(learning_rate=self.LR, beta_1=0, beta_2=0.99)
 
         self.GE = clone_model(self.G)
         self.GE.set_weights(self.G.get_weights())
@@ -217,7 +228,7 @@ class GAN(object):
         #Actual Model
         x = Dense(4*4*4*cha, activation = 'relu', kernel_initializer = 'random_normal')(x)
         x = Reshape([4, 4, 4*cha])(x)
-        x, r = g_block(x, inp_style[0], inp_noise, 32 * cha, u = False)  #4
+        x, r = g_block(x, inp_style[0], inp_noise, 32 * cha, u=False)  #4
         outs.append(r)
         x, r = g_block(x, inp_style[1], inp_noise, 16 * cha)  #8
         outs.append(r)
@@ -304,10 +315,10 @@ class StyleGAN(object):
         self.GAN.G.summary()
 
         #Data generator
-        self.im = iter(dataset)
+        self.im = iter(dataset) # manually resets the dataset
 
         #Set up variables
-        self.lastblip = time.clock()
+        self.lastblip = time.process_time() # replaced --A
         self.silent = silent
         self.ones = np.ones((BATCH_SIZE, 1), dtype=np.float32)
         self.zeros = np.zeros((BATCH_SIZE, 1), dtype=np.float32)
@@ -380,11 +391,12 @@ class StyleGAN(object):
             if self.GAN.steps % 1000 == 0 or (self.GAN.steps % 100 == 0 and self.GAN.steps < 2500):
                 self.evaluate(floor(self.GAN.steps / 1000))
 
-        printProgressBar(self.GAN.steps % 100, 99, decimals = 0)
+        # printProgressBar(self.GAN.steps % 100, 99, decimals = 0)
+        print("self.GAN.steps =", self.GAN.steps+1)
         self.GAN.steps = self.GAN.steps + 1
 
     @tf.function
-    def train_step(self, images, style, noise, perform_gp = True, perform_pl = False):
+    def train_step(self, images, style, noise, perform_gp=True, perform_pl=False):
         with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
             #Get style information
             w_space = []
@@ -438,12 +450,11 @@ class StyleGAN(object):
 
         return disc_loss, gen_loss, divergence, pl_lengths
 
-    def evaluate(self, num = 0, trunc = 1.0):
+    def evaluate(self, num=0, trunc=1.0):
         n1 = noiseList(64)
         n2 = nImage(64)
         trunc = np.ones([64, 1]) * trunc
-
-        generated_images = self.GAN.GM.predict(n1 + [n2], batch_size = BATCH_SIZE)
+        generated_images = self.GAN.GM.predict(n1 + [n2], batch_size=BATCH_SIZE)
 
         r = []
         for i in range(0, 64, 8):
@@ -455,7 +466,8 @@ class StyleGAN(object):
         x.save("Results/i"+str(num)+".png")
 
         # Moving Average
-        generated_images = self.GAN.GMA.predict(n1 + [n2, trunc], batch_size = BATCH_SIZE)
+        # generated_images = self.GAN.GMA.predict(n1 + [n2, trunc], batch_size=BATCH_SIZE) # Alison removed
+        generated_images = self.GAN.GMA.predict(n1 + [n2], batch_size=BATCH_SIZE)
         #generated_images = self.generateTruncated(n1, trunc = trunc)
 
         r = []
@@ -477,7 +489,8 @@ class StyleGAN(object):
         p2 = [n2] * (n_layers - tt)
 
         latent = p1 + [] + p2
-        generated_images = self.GAN.GMA.predict(latent + [nImage(64), trunc], batch_size = BATCH_SIZE)
+        # generated_images = self.GAN.GMA.predict(latent + [nImage(64), trunc], batch_size=BATCH_SIZE) # Alison removed
+        generated_images = self.GAN.GMA.predict(latent + [nImage(64)], batch_size=BATCH_SIZE)
         #generated_images = self.generateTruncated(latent, trunc = trunc)
 
         r = []
@@ -488,6 +501,7 @@ class StyleGAN(object):
         c1 = np.clip(c1, 0.0, 1.0)
         x = Image.fromarray(np.uint8(c1*255))
         x.save("Results/i"+str(num)+"-mr.png")
+
 
     def generateTruncated(self, style, noi = np.zeros([44]), trunc = 0.5, outImage = False, num = 0):
         #Get W's center of mass
@@ -551,12 +565,39 @@ class StyleGAN(object):
         self.GAN.GenModelA()
 
 
+
+# %%
+
 if __name__ == "__main__":
-    model = StyleGAN(lr = 0.0001, silent = False)
+    train_size = 100 
+    batch_size = 100
+    datastr = "cifar10"
+    (x_train, y_train), (x_test, y_test) = getattr(tf.keras.datasets, datastr).load_data()
+    x_train = x_train[:train_size, ...]
+    x_train = tf.image.resize(x_train, (256, 256))
+    dataset = tf.data.Dataset.from_tensor_slices((x_train,)) \
+        .repeat() \
+        .batch(batch_size) \
+        .prefetch(tf.data.AUTOTUNE)
+
+    with tf.device('/GPU:0'):
+        dataset = dataset.map(lambda x: tf.cast(x, tf.float32))
+
+    model = StyleGAN(dataset, lr=0.0001, silent=False)
     model.evaluate(0)
 
-    while model.GAN.steps < 1000001:
-        model.train()
+    while model.GAN.steps < 100: # 1000001:
+        try:
+            model.train()
+        except Exception as e:
+            print(e)
+
+    if False:
+        n1 = noiseList(1)
+        n2 = nImage(1)
+        im = model.generateTruncated(n1, noi=n2, trunc=i / 50, outImage=True, num=0)
+        Image.fromarray(np.uint8(ims[0, ...] * 255)).convert('RGB')
+    
 
     """
     model.load(31)
@@ -567,3 +608,34 @@ if __name__ == "__main__":
         print(i, end = '\r')
         model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
     """
+
+# %%
+"""
+Debugging:
+    - loading smaller CIFAR10 data n=10: this may have fixed for now (only need 100 for DiffAugment anyway)
+    - error handling: 
+    - only running train() once, ie, not in while loop: 
+    - examine model.train(), can you specify epochs?
+    - psutil: won't print
+    - try batching the dataset: didn't help
+
+Other issues:
+    - what does model.load() do?
+    - model.train() seems to be a single step
+
+
+Error handling:
+    ```
+    import tensorflow as tf
+
+    # Wrap critical sections
+    try:
+        # Your training code here
+        with tf.device('/GPU:0'):
+            # Specific training operations
+    except tf.errors.ResourceExhaustedError as e:
+        print("GPU Memory Overflow:", e)
+    except Exception as e:
+        print("Unexpected Error:", e)
+    ```
+"""
