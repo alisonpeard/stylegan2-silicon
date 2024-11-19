@@ -1,3 +1,4 @@
+# %%
 from PIL import Image
 from math import floor, log2
 import numpy as np
@@ -19,7 +20,8 @@ from conv_mod import *
 im_size = 256
 latent_size = 512
 BATCH_SIZE = 16
-directory = "Earth"
+MODE = "viewing"
+# directory = "Earth"
 
 cha = 24
 
@@ -117,7 +119,7 @@ def d_block(inp, fil, p = True):
     out = add([res, out])
 
     if p:
-        out = AveragePooling2D()(out)
+        out = AveragePooling2D(pool_size=(2, 2))(out)
 
     return out
 
@@ -128,7 +130,7 @@ def to_rgb(inp, style):
 
 def from_rgb(inp, conc = None):
     fil = int(im_size * 4 / inp.shape[2])
-    z = AveragePooling2D()(inp)
+    z = AveragePooling2D(pool_size=(2, 2))(inp)
     x = Conv2D(fil, 1, kernel_initializer = 'he_uniform')(z)
     if conc is not None:
         x = concatenate([x, conc])
@@ -621,20 +623,23 @@ class StyleGAN(object):
         self.GAN.GenModel()
         self.GAN.GenModelA()
 
-
-
-
-
-
-
-
-
+# %%
 if __name__ == "__main__":
-    model = StyleGAN(lr = 0.0001, silent = False)
-    model.evaluate(0)
+    if MODE == "training":
+        model = StyleGAN(lr=0.0001, silent=False)
+        model.evaluate(0)
 
-    while model.GAN.steps < 1000001:
-        model.train()
+        while model.GAN.steps < 1000001:
+            model.train()
+    elif MODE == "viewing":
+        model = StyleGAN(lr=0.0001, silent=False)
+        model.load(19)
+
+        n1 = noiseList(64)
+        n2 = nImage(64)
+        for i in range(50):
+            print(i, end = '\r')
+            model.generateTruncated(n1, noi=n2, trunc=(i / 50), outImage=True, num=i)
 
     """
     model.load(31)
@@ -645,3 +650,4 @@ if __name__ == "__main__":
         print(i, end = '\r')
         model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
     """
+# %%
