@@ -19,10 +19,12 @@ from tensorflow.keras.losses import BinaryCrossentropy
 
 from datagen import printProgressBar
 from conv_mod import *
+from diffaugment import DiffAugment
 
-im_size = 256
+im_size = 32 # 256
 latent_size = 512
 BATCH_SIZE = 16
+POLICY = "color,translation,cutout"
 # directory = "Earth"
 
 cha = 24
@@ -30,6 +32,11 @@ cha = 24
 n_layers = int(log2(im_size) - 1)
 
 mixed_prob = 0.9
+
+
+def T(tensor:tf.Tensor):
+    """Chill DiffAugment wrapper."""
+    return DiffAugment(tensor, policy=POLICY, channels_first=False)
 
 def noise(n):
     return np.random.normal(0.0, 1.0, size = [n, latent_size]).astype('float32')
@@ -164,6 +171,7 @@ class GAN(object):
         #Config
         self.LR = lr
         self.steps = steps
+        self.images_seen = 0
         self.beta = 0.99
 
         #Init Models
@@ -185,12 +193,24 @@ class GAN(object):
 
         inp = Input(shape = [im_size, im_size, 3])
         x = d_block(inp, 1 * cha)   #128
-        x = d_block(x, 2 * cha)   #64
-        x = d_block(x, 4 * cha)   #32
-        x = d_block(x, 6 * cha)  #16
-        x = d_block(x, 8 * cha)  #8
-        x = d_block(x, 16 * cha)  #4
-        x = d_block(x, 32 * cha, p = False)  #4
+
+        # Alison addition to allow smaller images
+        im_sizes = np.array([4, 8, 16, 32, 64])
+        filters = np.array([16, 8, 6, 4 , 2])
+        assert im_size in im_sizes, "Invalid image size for network."
+        filters = filters[im_sizes <= im_size]
+        im_sizes = im_sizes[im_sizes <= im_size] # I think will have to change to numpy
+
+        for depth in filters[::-1]:
+            x = d_block(x, depth * cha)
+        x = d_block(x, 32 * cha, p=False)  #4
+
+        # x = d_block(x, 2 * cha)   #64
+        # x = d_block(x, 4 * cha)   #32
+        # x = d_block(x, 6 * cha)  #16
+        # x = d_block(x, 8 * cha)  #8
+        # x = d_block(x, 16 * cha)  #4
+        # x = d_block(x, 32 * cha, p=False)  #4
 
         x = Flatten()(x) # Todo: change to patchGAN?
         x = Dense(1, kernel_initializer = 'he_uniform')(x)
@@ -228,20 +248,33 @@ class GAN(object):
         #Actual Model
         x = Dense(4*4*4*cha, activation = 'relu', kernel_initializer = 'random_normal')(x)
         x = Reshape([4, 4, 4*cha])(x)
+
         x, r = g_block(x, inp_style[0], inp_noise, 32 * cha, u=False)  #4
         outs.append(r)
-        x, r = g_block(x, inp_style[1], inp_noise, 16 * cha)  #8
-        outs.append(r)
-        x, r = g_block(x, inp_style[2], inp_noise, 8 * cha)  #16
-        outs.append(r)
-        x, r = g_block(x, inp_style[3], inp_noise, 6 * cha)  #32
-        outs.append(r)
-        x, r = g_block(x, inp_style[4], inp_noise, 4 * cha)   #64
-        outs.append(r)
-        x, r = g_block(x, inp_style[5], inp_noise, 2 * cha)   #128
-        outs.append(r)
-        x, r = g_block(x, inp_style[6], inp_noise, 1 * cha)   #256
-        outs.append(r)
+
+        # Alison addition to allow smaller images
+        out_size = 0
+        i = 1
+        im_sizes = [8, 16, 32, 64, 128, 256]
+        filters = [16, 8, 6, 4, 2, 1]
+        assert im_size in im_sizes, "Invalid image size for network."
+        for size, depth in zip(im_sizes, filters):
+            if size <= im_size:
+                x, r = g_block(x, inp_style[i], inp_noise, depth * cha)
+                outs.append(r)
+                i += 1
+        # x, r = g_block(x, inp_style[1], inp_noise, 16 * cha)  #8
+        # outs.append(r)
+        # x, r = g_block(x, inp_style[2], inp_noise, 8 * cha)  #16
+        # outs.append(r)
+        # x, r = g_block(x, inp_style[3], inp_noise, 6 * cha)  #32
+        # outs.append(r)
+        # x, r = g_block(x, inp_style[4], inp_noise, 4 * cha)   #64
+        # outs.append(r)
+        # x, r = g_block(x, inp_style[5], inp_noise, 2 * cha)   #128
+        # outs.append(r)
+        # x, r = g_block(x, inp_style[6], inp_noise, 1 * cha)   #256
+        # outs.append(r)
 
         x = add(outs)
         x = Lambda(lambda y: y/2 + 0.5)(x) #Use values centered around 0, but normalize to [0, 1], providing better initialization
@@ -366,8 +399,8 @@ class StyleGAN(object):
             print("G:", np.array(b))
             print("PL:", self.pl_mean)
 
-            s = round((time.clock() - self.lastblip), 4)
-            self.lastblip = time.clock()
+            s = round((time.process_time() - self.lastblip), 4)
+            self.lastblip = time.process_time()
 
             steps_per_second = 100 / s
             steps_per_minute = steps_per_second * 60
@@ -392,8 +425,10 @@ class StyleGAN(object):
                 self.evaluate(floor(self.GAN.steps / 1000))
 
         # printProgressBar(self.GAN.steps % 100, 99, decimals = 0)
-        print("self.GAN.steps =", self.GAN.steps+1)
-        self.GAN.steps = self.GAN.steps + 1
+        # print("self.GAN.steps =", self.GAN.steps+1)
+        # self.GAN.steps = self.GAN.steps + 1
+        print("self.GAN.images_seen =", self.GAN.images_seen)
+        self.GAN.images_seen += batch.shape[0] # Alison addition
 
     @tf.function
     def train_step(self, images, style, noise, perform_gp=True, perform_pl=False):
@@ -408,8 +443,8 @@ class StyleGAN(object):
             generated_images = self.GAN.G(w_space + [noise])
 
             #Discriminate
-            real_output = self.GAN.D(images, training=True)
-            fake_output = self.GAN.D(generated_images, training=True)
+            real_output = self.GAN.D(T(images), training=True)           # add diffaugment
+            fake_output = self.GAN.D(T(generated_images), training=True) # add diffaugment
 
             #Loss functions
             # Todo: Try Spectral Normalisation of Discriminator (as alternative to GP)
@@ -569,12 +604,21 @@ class StyleGAN(object):
 # %%
 
 if __name__ == "__main__":
-    train_size = 100 
-    batch_size = 100
+    train_size = 100 # 100-shot-learning
+    batch_size = 16
+
+    # get CIFAR10 data (add pandas another time?)
     datastr = "cifar10"
     (x_train, y_train), (x_test, y_test) = getattr(tf.keras.datasets, datastr).load_data()
     x_train = x_train[:train_size, ...]
-    x_train = tf.image.resize(x_train, (256, 256))
+    x_train = tf.image.resize(x_train, (im_size, im_size))
+
+    # view one train image
+    img = Image.fromarray(np.uint8(x_train[0, ...] * 255)).convert('RGB')
+    display(img)
+
+
+    # make dataset
     dataset = tf.data.Dataset.from_tensor_slices((x_train,)) \
         .repeat() \
         .batch(batch_size) \
@@ -586,27 +630,42 @@ if __name__ == "__main__":
     model = StyleGAN(dataset, lr=0.0001, silent=False)
     model.evaluate(0)
 
-    while model.GAN.steps < 100: # 1000001:
+    # while model.GAN.steps < 1000: # 1000001:
+    while model.GAN.images_seen < 300_000:
         try:
             model.train()
         except Exception as e:
             print(e)
 
-    if False:
-        n1 = noiseList(1)
-        n2 = nImage(1)
-        im = model.generateTruncated(n1, noi=n2, trunc=i / 50, outImage=True, num=0)
-        Image.fromarray(np.uint8(ims[0, ...] * 255)).convert('RGB')
-    
-
-    """
-    model.load(31)
-
+    print("Done! Plotting")
     n1 = noiseList(64)
     n2 = nImage(64)
-    for i in range(50):
-        print(i, end = '\r')
-        model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
+    im = model.generateTruncated(n1, noi=n2, trunc=50/50, outImage=True, num=0)
+    for i in range(64):
+        img = Image.fromarray(np.uint8(im[i, ...] * 255)).convert('RGB')
+        img.save(f"figures/{datastr}_{i}_300k.png")
+    display(img)
+    
+
+    # %%
+    from diffaugment.data import create_from_images
+
+    datadir = "data/100-shot-panda"
+    create_from_images(datadir, 32, channels_first=False)
+
+    # load tfrecord dataset
+    """
+    Commands:
+
+        ```python
+        model.load(31)
+
+        n1 = noiseList(64)
+        n2 = nImage(64)
+        for i in range(50):
+            print(i, end = '\r')
+            model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
+        ```
     """
 
 # %%
