@@ -9,10 +9,10 @@ import psutil
 import os
 
 import keras
-from tensorflow.keras.layers import *
-from tensorflow.keras.models import *
-from tensorflow.keras.optimizers import *
-from tensorflow.keras.initializers import *
+from tensorflow.keras import layers
+from tensorflow.keras.models import Sequential, Model, clone_model, model_from_json
+from  tensorflow.keras.optimizers import Adam
+from tensorflow.keras.initializers import VarianceScaling
 import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras.losses import BinaryCrossentropy
@@ -22,9 +22,9 @@ from conv_mod import *
 
 # Alison additions
 from diffaugment.augment import DiffAugment
-from lambdas import MakeOnesLambda, CenterLambda, CropToFitLambda, UpsampleLambda, UpsampleToSizeLambda
+import lambdas
 
-im_size = 32 # 256
+im_size = 256 # 256
 latent_size = 512
 BATCH_SIZE = 16
 POLICY = "color,translation,cutout"
@@ -68,80 +68,47 @@ def gradient_penalty(samples, output, weight):
     # Penalize the gradient norm
     return K.mean(gradient_penalty) * weight * 0.5
 
-# def hinge_d(y_true, y_pred):
-#     return K.mean(K.relu(1.0 + (y_true * y_pred)))
-#
-# def w_loss(y_true, y_pred):
-#     return K.mean(y_true * y_pred)
-
-
-# #Lambdas
-# @keras.saving.register_keras_serializable()
-# def crop_to_fit(x):
-#     height = x[1].shape[1]
-#     width = x[1].shape[2]
-
-#     return x[0][:, :height, :width, :]
-
-# @keras.saving.register_keras_serializable()
-# def upsample(x):
-#     return K.resize_images(x,2,2,"channels_last",interpolation='bilinear')
-
-# @keras.saving.register_keras_serializable()
-# def upsample_to_size(x):
-#     y = im_size // x.shape[2]
-#     x = K.resize_images(x, y, y, "channels_last",interpolation='bilinear')
-#     return x
-
-# @keras.saving.register_keras_serializable()
-# def make_ones(x):
-#     return x[:, :1] * 0 + 1
-
-# @keras.saving.register_keras_serializable()
-# def center(x):
-#     return x / 2 + 0.5
 
 #Blocks
 def g_block(inp, istyle, inoise, fil, u=True):
     if u:
         #Custom upsampling because of clone_model issue
-        # out = Lambda(upsample, output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
-        out = UpsampleLambda(output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
+        out = lambdas.Upsample()(inp)
     else:
-        out = Activation('linear')(inp)
+        out = layers.Activation('linear')(inp)
         
-    rgb_style = Dense(fil, kernel_initializer=VarianceScaling(200 / out.shape[2]))(istyle)
-    style = Dense(inp.shape[-1], kernel_initializer = 'he_uniform')(istyle)
-    delta = Lambda(crop_to_fit)([inoise, out])
-    d = Dense(fil, kernel_initializer = 'zeros')(delta)
+    rgb_style = layers.Dense(fil, kernel_initializer=VarianceScaling(200 / out.shape[2]))(istyle)
+    style = layers.Dense(inp.shape[-1], kernel_initializer = 'he_uniform')(istyle)
+    delta = lambdas.CropToFit()([inoise, out])
+    d = layers.Dense(fil, kernel_initializer = 'zeros')(delta)
 
     out = Conv2DMod(filters=fil, kernel_size=3, padding='same', kernel_initializer='he_uniform')([out, style])
-    out = add([out, d])
-    out = LeakyReLU(0.2)(out)
+    out = layers.add([out, d])
+    out = layers.LeakyReLU(0.2)(out)
 
-    style = Dense(fil, kernel_initializer = 'he_uniform')(istyle)
-    d = Dense(fil, kernel_initializer = 'zeros')(delta)
+    style = layers.Dense(fil, kernel_initializer = 'he_uniform')(istyle)
+    d = layers.Dense(fil, kernel_initializer = 'zeros')(delta)
 
-    out = Conv2DMod(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')([out, style])
-    out = add([out, d])
-    out = LeakyReLU(0.2)(out)
+    out = Conv2DMod(filters = fil, kernel_size = 3, padding='same', kernel_initializer = 'he_uniform')([out, style])
+    out = layers.add([out, d])
+    out = layers.LeakyReLU(0.2)(out)
 
     rgb = to_rgb(out, rgb_style)
     return out, rgb
 
 
 def d_block(inp, fil, p = True):
-    res = Conv2D(fil, 1, kernel_initializer = 'he_uniform')(inp)
+    res = layers.Conv2D(fil, 1, kernel_initializer = 'he_uniform')(inp)
 
-    out = Conv2D(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')(inp)
-    out = LeakyReLU(0.2)(out)
-    out = Conv2D(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')(out)
-    out = LeakyReLU(0.2)(out)
+    out = layers.Conv2D(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')(inp)
+    out = layers.LeakyReLU(0.2)(out)
+    out = layers.Conv2D(filters = fil, kernel_size = 3, padding = 'same', kernel_initializer = 'he_uniform')(out)
+    out = layers.LeakyReLU(0.2)(out)
 
-    out = add([res, out])
+    out = layers.add([res, out])
 
     if p:
-        out = AveragePooling2D(pool_size=(2, 2))(out)
+        out = layers.AveragePooling2D(pool_size=(2, 2))(out)
 
     return out
 
@@ -149,21 +116,21 @@ def d_block(inp, fil, p = True):
 def to_rgb(inp, style):
     size = inp.shape[2]
     x = Conv2DMod(3, 1, kernel_initializer = VarianceScaling(200/size), demod = False)([inp, style])
-    out = Lambda(upsample_to_size, output_shape=(im_size, im_size, None))(x) # changed to tuple --Alison
+    out = lambdas.UpsampleToSize(im_size)(x)
     return out
 
 
 def from_rgb(inp, conc = None):
     fil = int(im_size * 4 / inp.shape[2])
-    z = AveragePooling2D(pool_size=(2, 2))(inp)
-    x = Conv2D(fil, 1, kernel_initializer = 'he_uniform')(z)
+    z = layers.AveragePooling2D(pool_size=(2, 2))(inp)
+    x = layers.Conv2D(fil, 1, kernel_initializer = 'he_uniform')(z)
     if conc is not None:
-        x = concatenate([x, conc])
+        x = layers.concatenate([x, conc])
     return x, z
 
 
 
-
+# %%
 
 class GAN(object):
 
@@ -202,12 +169,12 @@ class GAN(object):
         if self.D:
             return self.D
 
-        inp = Input(shape = [im_size, im_size, 3])
+        inp = layers.Input(shape = [im_size, im_size, 3])
         x = d_block(inp, 1 * cha)   #128
 
         # Alison addition to allow smaller images
-        im_sizes = np.array([4, 8, 16, 32, 64])
-        filters = np.array([16, 8, 6, 4 , 2])
+        im_sizes = np.array([4, 8, 16, 32, 64, 128, 256])
+        filters = np.array([64, 32, 16, 8, 6, 4 , 2])
         assert im_size in im_sizes, "Invalid image size for network."
         filters = filters[im_sizes <= im_size]
         im_sizes = im_sizes[im_sizes <= im_size] # I think will have to change to numpy
@@ -223,8 +190,8 @@ class GAN(object):
         # x = d_block(x, 16 * cha)  #4
         # x = d_block(x, 32 * cha, p=False)  #4
 
-        x = Flatten()(x) # Todo: change to patchGAN?
-        x = Dense(1, kernel_initializer = 'he_uniform')(x)
+        x = layers.Flatten()(x) # Todo: change to patchGAN?
+        x = layers.Dense(1, kernel_initializer = 'he_uniform')(x)
 
         self.D = Model(inputs = inp, outputs = x)
         return self.D
@@ -235,30 +202,30 @@ class GAN(object):
 
         # === Style Mapping ===
         self.S = Sequential()
-        self.S.add(Dense(512, input_shape = [latent_size]))
-        self.S.add(LeakyReLU(0.2))
-        self.S.add(Dense(512))
-        self.S.add(LeakyReLU(0.2))
-        self.S.add(Dense(512))
-        self.S.add(LeakyReLU(0.2))
-        self.S.add(Dense(512))
-        self.S.add(LeakyReLU(0.2))
+        self.S.add(layers.Dense(512, input_shape = [latent_size]))
+        self.S.add(layers.LeakyReLU(0.2))
+        self.S.add(layers.Dense(512))
+        self.S.add(layers.LeakyReLU(0.2))
+        self.S.add(layers.Dense(512))
+        self.S.add(layers.LeakyReLU(0.2))
+        self.S.add(layers.Dense(512))
+        self.S.add(layers.LeakyReLU(0.2))
 
         # === Generator ===
         #Inputs
         inp_style = []
         for i in range(n_layers):
-            inp_style.append(Input([512]))
-        inp_noise = Input([im_size, im_size, 1])
+            inp_style.append(layers.Input([512]))
+        inp_noise = layers.Input([im_size, im_size, 1])
 
         #!Latent - causes problem loading from JSON 'lambda'
-        x = Lambda(make_ones)(inp_style[0])
+        x = lambdas.MakeOnes()(inp_style[0])
 
         outs = []
 
         #Actual Model
-        x = Dense(4*4*4*cha, activation = 'relu', kernel_initializer = 'random_normal')(x)
-        x = Reshape([4, 4, 4*cha])(x)
+        x = layers.Dense(4*4*4*cha, activation = 'relu', kernel_initializer = 'random_normal')(x)
+        x = layers.Reshape([4, 4, 4*cha])(x)
 
         x, r = g_block(x, inp_style[0], inp_noise, 32 * cha, u=False)  #4
         outs.append(r)
@@ -274,23 +241,10 @@ class GAN(object):
                 x, r = g_block(x, inp_style[i], inp_noise, depth * cha)
                 outs.append(r)
                 i += 1
-        # x, r = g_block(x, inp_style[1], inp_noise, 16 * cha)  #8
-        # outs.append(r)
-        # x, r = g_block(x, inp_style[2], inp_noise, 8 * cha)  #16
-        # outs.append(r)
-        # x, r = g_block(x, inp_style[3], inp_noise, 6 * cha)  #32
-        # outs.append(r)
-        # x, r = g_block(x, inp_style[4], inp_noise, 4 * cha)   #64
-        # outs.append(r)
-        # x, r = g_block(x, inp_style[5], inp_noise, 2 * cha)   #128
-        # outs.append(r)
-        # x, r = g_block(x, inp_style[6], inp_noise, 1 * cha)   #256
-        # outs.append(r)
 
-        x = add(outs)
+        x = layers.add(outs)
         #!Latent - causes problem loading from JSON 'lambda_12'
-        x = Lambda(center)(x) #Use values centered around 0, but normalize to [0, 1], providing better initialization
-
+        x = lambdas.Center()(x) #Use values centered around 0, but normalize to [0, 1], providing better initialization
         self.G = Model(inputs = inp_style + [inp_noise], outputs = x)
         return self.G
 
@@ -300,10 +254,10 @@ class GAN(object):
         style = []
 
         for i in range(n_layers):
-            inp_style.append(Input([latent_size]))
+            inp_style.append(layers.Input([latent_size]))
             style.append(self.S(inp_style[-1]))
 
-        inp_noise = Input([im_size, im_size, 1])
+        inp_noise = layers.Input([im_size, im_size, 1])
         gf = self.G(style + [inp_noise])
 
         self.GM = Model(inputs = inp_style + [inp_noise], outputs = gf)
@@ -316,10 +270,10 @@ class GAN(object):
         style = []
 
         for i in range(n_layers):
-            inp_style.append(Input([latent_size]))
+            inp_style.append(layers.Input([latent_size]))
             style.append(self.SE(inp_style[-1]))
 
-        inp_noise = Input([im_size, im_size, 1])
+        inp_noise = layers.Input([im_size, im_size, 1])
         gf = self.GE(style + [inp_noise])
 
         self.GMA = Model(inputs = inp_style + [inp_noise], outputs = gf)
@@ -593,7 +547,14 @@ class StyleGAN(object):
             json = file.read()
 
         mod = model_from_json(json,
-                              custom_objects={'Conv2DMod': Conv2DMod}
+                              custom_objects={
+                                  'Conv2DMod': Conv2DMod,
+                                  'Upsample': lambdas.Upsample,
+                                  'UpsampleToSize': lambdas.UpsampleToSize,
+                                  'MakeOnes': lambdas.MakeOnes,
+                                  'CropToFit': lambdas.CropToFit,
+                                  'Center': lambdas.Center
+                                  }
                               )
         mod.load_weights("Models/"+name+"_"+str(num)+".h5")
         return mod
@@ -639,12 +600,13 @@ if __name__ == "__main__":
 
     model = StyleGAN(dataset, lr=0.0001, silent=False)
     model.evaluate(0)
-
-    while model.GAN.steps < 1000001:
-        try:
-            model.train()
-        except Exception as e:
-            print(e)
+    
+    if False: # training
+        while model.GAN.steps < 1000001:
+            try:
+                model.train()
+            except Exception as e:
+                print(e)
 
         """
         Commands:

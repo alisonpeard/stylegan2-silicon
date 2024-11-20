@@ -1,38 +1,8 @@
-"""
- |  The main reason to subclass `tf.keras.layers.Layer` instead of using a
- |  `Lambda` layer is saving and inspecting a Model. `Lambda` layers
- |  are saved by serializing the Python bytecode, which is fundamentally
- |  non-portable. They should only be loaded in the same environment where
- |  they were saved. Subclassed layers can be saved in a more portable way
- |  by overriding their `get_config()` method. Models that rely on
- |  subclassed Layers are also often easier to visualize and reason about.
- |
- |  ```python
- |  scale = tf.Variable(1.)
- |  scale_layer = tf.keras.layers.Lambda(lambda x: x * scale)
- |  ```
- |  
- |  Because `scale_layer` does not directly track the `scale` variable, it will
- |  not appear in `scale_layer.trainable_weights` and will therefore not be
- |  trained if `scale_layer` is used in a Model.
- |  
- |  A better pattern is to write a subclassed Layer:
- |  
- |  ```python
- |  class ScaleLayer(tf.keras.layers.Layer):
- |      def __init__(self, **kwargs):
- |          super().__init__(**kwargs)
- |          self.scale = tf.Variable(1.)
- |  
- |      def call(self, inputs):
- |          return inputs * self.scale
- |  ``` 
-"""
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import keras.backend as K
 
-class MakeOnesLambda(Layer):
+class MakeOnes(Layer):
     """
     Seems to turn top row to ones.
 
@@ -45,7 +15,7 @@ class MakeOnesLambda(Layer):
         return x[:, :1] * 0 + 1
 
 
-class CenterLambda(Layer):
+class Center(Layer):
     """
     Use values centered around 0, but normalize to [0, 1].
     
@@ -60,7 +30,8 @@ class CenterLambda(Layer):
     def call(self, x):
         return x / 2 + 0.5
 
-class CropToFitLambda(Layer):
+
+class CropToFit(Layer):
     """
     @keras.saving.register_keras_serializable()
     def crop_to_fit(x):
@@ -78,7 +49,7 @@ class CropToFitLambda(Layer):
         return x[0][:, :height, :width, :]
 
 
-class UpsampleToSizeLambda(Layer):
+class UpsampleToSize(Layer):
     """
     @keras.saving.register_keras_serializable()
     def upsample_to_size(x):
@@ -97,7 +68,7 @@ class UpsampleToSizeLambda(Layer):
 
 
 
-class UpsampleLambda(Layer):
+class Upsample(Layer):
     """
     @keras.saving.register_keras_serializable()
     def upsample(x):
