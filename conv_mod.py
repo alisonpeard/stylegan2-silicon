@@ -5,9 +5,11 @@ from tensorflow.keras import backend as K
 from tensorflow.keras import initializers, regularizers, constraints
 from tensorflow.keras.layers import Layer, InputSpec
 from tensorflow.python.keras.utils import conv_utils
+import keras
 import tensorflow as tf
 
 
+@keras.saving.register_keras_serializable()
 class Conv2DMod(Layer):
 
     def __init__(self,

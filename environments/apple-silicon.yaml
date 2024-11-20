@@ -35,9 +35,8 @@ dependencies:
     - seaborn
     - pyarrow>=10.0.1
     - pip:
-        - tensorflow-macos
+        - tensorflow-macos==2.15.0 # to work with JSON models with lambda layersy
         - tensorflow-metal
         - environs
         - bottleneck
-        - wandb==0.16.6 # stable May 2024
         - pytest

@@ -19,7 +19,10 @@ from tensorflow.keras.losses import BinaryCrossentropy
 
 from datagen import printProgressBar
 from conv_mod import *
-from diffaugment import DiffAugment
+
+# Alison additions
+from diffaugment.augment import DiffAugment
+from lambdas import MakeOnesLambda, CenterLambda, CropToFitLambda, UpsampleLambda, UpsampleToSizeLambda
 
 im_size = 32 # 256
 latent_size = 512
@@ -72,30 +75,38 @@ def gradient_penalty(samples, output, weight):
 #     return K.mean(y_true * y_pred)
 
 
-#Lambdas
-@keras.saving.register_keras_serializable()
-def crop_to_fit(x):
-    height = x[1].shape[1]
-    width = x[1].shape[2]
+# #Lambdas
+# @keras.saving.register_keras_serializable()
+# def crop_to_fit(x):
+#     height = x[1].shape[1]
+#     width = x[1].shape[2]
 
-    return x[0][:, :height, :width, :]
+#     return x[0][:, :height, :width, :]
 
-@keras.saving.register_keras_serializable()
-def upsample(x):
-    return K.resize_images(x,2,2,"channels_last",interpolation='bilinear')
+# @keras.saving.register_keras_serializable()
+# def upsample(x):
+#     return K.resize_images(x,2,2,"channels_last",interpolation='bilinear')
 
-@keras.saving.register_keras_serializable()
-def upsample_to_size(x):
-    y = im_size // x.shape[2]
-    x = K.resize_images(x, y, y, "channels_last",interpolation='bilinear')
-    return x
+# @keras.saving.register_keras_serializable()
+# def upsample_to_size(x):
+#     y = im_size // x.shape[2]
+#     x = K.resize_images(x, y, y, "channels_last",interpolation='bilinear')
+#     return x
 
+# @keras.saving.register_keras_serializable()
+# def make_ones(x):
+#     return x[:, :1] * 0 + 1
+
+# @keras.saving.register_keras_serializable()
+# def center(x):
+#     return x / 2 + 0.5
 
 #Blocks
 def g_block(inp, istyle, inoise, fil, u=True):
     if u:
         #Custom upsampling because of clone_model issue
-        out = Lambda(upsample, output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
+        # out = Lambda(upsample, output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
+        out = UpsampleLambda(output_shape=(inp.shape[2] * 2, inp.shape[2] * 2, inp.shape[-1]))(inp)
     else:
         out = Activation('linear')(inp)
         
@@ -240,8 +251,8 @@ class GAN(object):
             inp_style.append(Input([512]))
         inp_noise = Input([im_size, im_size, 1])
 
-        #Latent
-        x = Lambda(lambda x: x[:, :1] * 0 + 1)(inp_style[0])
+        #!Latent - causes problem loading from JSON 'lambda'
+        x = Lambda(make_ones)(inp_style[0])
 
         outs = []
 
@@ -277,7 +288,8 @@ class GAN(object):
         # outs.append(r)
 
         x = add(outs)
-        x = Lambda(lambda y: y/2 + 0.5)(x) #Use values centered around 0, but normalize to [0, 1], providing better initialization
+        #!Latent - causes problem loading from JSON 'lambda_12'
+        x = Lambda(center)(x) #Use values centered around 0, but normalize to [0, 1], providing better initialization
 
         self.G = Model(inputs = inp_style + [inp_noise], outputs = x)
         return self.G
@@ -340,7 +352,7 @@ class GAN(object):
 
 class StyleGAN(object):
 
-    def __init__(self, dataset, steps = 1, lr = 0.0001, decay = 0.00001, silent = True):
+    def __init__(self, dataset=None, steps=1, lr=0.0001, decay=0.00001, silent=True):
         #Init GAN and Eval Models
         self.GAN = GAN(steps = steps, lr = lr, decay = decay)
         self.GAN.GenModel()
@@ -348,7 +360,10 @@ class StyleGAN(object):
         self.GAN.G.summary()
 
         #Data generator
-        self.im = iter(dataset) # manually resets the dataset
+        if dataset is not None:
+            self.im = iter(dataset) # manually resets the dataset
+        else:
+            self.im = None
 
         #Set up variables
         self.lastblip = time.process_time() # replaced --A
@@ -577,7 +592,9 @@ class StyleGAN(object):
         with open("Models/"+name+".json", 'r') as file:
             json = file.read()
 
-        mod = model_from_json(json, custom_objects = {'Conv2DMod': Conv2DMod})
+        mod = model_from_json(json,
+                              custom_objects={'Conv2DMod': Conv2DMod}
+                              )
         mod.load_weights("Models/"+name+"_"+str(num)+".h5")
         return mod
 
@@ -600,9 +617,7 @@ class StyleGAN(object):
         self.GAN.GenModelA()
 
 
-
 # %%
-
 if __name__ == "__main__":
     train_size = 100 # 100-shot-learning
     batch_size = 16
@@ -612,11 +627,6 @@ if __name__ == "__main__":
     (x_train, y_train), (x_test, y_test) = getattr(tf.keras.datasets, datastr).load_data()
     x_train = x_train[:train_size, ...]
     x_train = tf.image.resize(x_train, (im_size, im_size))
-
-    # view one train image
-    img = Image.fromarray(np.uint8(x_train[0, ...] * 255)).convert('RGB')
-    display(img)
-
 
     # make dataset
     dataset = tf.data.Dataset.from_tensor_slices((x_train,)) \
@@ -630,71 +640,24 @@ if __name__ == "__main__":
     model = StyleGAN(dataset, lr=0.0001, silent=False)
     model.evaluate(0)
 
-    # while model.GAN.steps < 1000: # 1000001:
-    while model.GAN.images_seen < 300_000:
+    while model.GAN.steps < 1000001:
         try:
             model.train()
         except Exception as e:
             print(e)
 
-    print("Done! Plotting")
-    n1 = noiseList(64)
-    n2 = nImage(64)
-    im = model.generateTruncated(n1, noi=n2, trunc=50/50, outImage=True, num=0)
-    for i in range(64):
-        img = Image.fromarray(np.uint8(im[i, ...] * 255)).convert('RGB')
-        img.save(f"figures/{datastr}_{i}_300k.png")
-    display(img)
-    
+        """
+        Commands:
 
-    # %%
-    from diffaugment.data import create_from_images
+            ```python
+            model.load(31)
 
-    datadir = "data/100-shot-panda"
-    create_from_images(datadir, 32, channels_first=False)
-
-    # load tfrecord dataset
-    """
-    Commands:
-
-        ```python
-        model.load(31)
-
-        n1 = noiseList(64)
-        n2 = nImage(64)
-        for i in range(50):
-            print(i, end = '\r')
-            model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
-        ```
-    """
+            n1 = noiseList(64)
+            n2 = nImage(64)
+            for i in range(50):
+                print(i, end = '\r')
+                model.generateTruncated(n1, noi = n2, trunc = i / 50, outImage = True, num = i)
+            ```
+        """
 
 # %%
-"""
-Debugging:
-    - loading smaller CIFAR10 data n=10: this may have fixed for now (only need 100 for DiffAugment anyway)
-    - error handling: 
-    - only running train() once, ie, not in while loop: 
-    - examine model.train(), can you specify epochs?
-    - psutil: won't print
-    - try batching the dataset: didn't help
-
-Other issues:
-    - what does model.load() do?
-    - model.train() seems to be a single step
-
-
-Error handling:
-    ```
-    import tensorflow as tf
-
-    # Wrap critical sections
-    try:
-        # Your training code here
-        with tf.device('/GPU:0'):
-            # Specific training operations
-    except tf.errors.ResourceExhaustedError as e:
-        print("GPU Memory Overflow:", e)
-    except Exception as e:
-        print("Unexpected Error:", e)
-    ```
-"""
